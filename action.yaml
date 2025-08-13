@@ -1,0 +1,299 @@
+name: 'Container Diff Report Generator'
+description: 'A GitHub Action to generate a container diff report in markdown format.'
+author: 'aurimasniekis'
+branding:
+  icon: 'anchor'
+  color: 'blue'
+
+inputs:
+  image1:
+    description: 'First container image to compare (usually PR image)'
+    required: true
+  image2:
+    description: 'Second container image to compare (usually base image)'
+    required: true
+  allowed-extensions:
+    description: 'Comma-separated list of file extensions to diff (e.g., "js,ts,py,go,java"). Use "*" to allow all files.'
+    required: false
+    default: 'js,ts,jsx,tsx,py,go,java,kt,swift,rb,php,c,cpp,h,hpp,cs,rs,scala,clj,sh,bash,zsh,fish,ps1,bat,cmd,dockerfile,makefile,cmake,yaml,yml,json,xml,toml,ini,cfg,conf,config,properties,env,sql,md,txt,html,css,scss,sass,less,vue,svelte,dart,lua,r,pl,pm,ex,exs,erl,hrl,elm,hs,lhs,ml,mli,fs,fsx,fsi,vb,asm,s,m,mm,plist'
+  max-file-size:
+    description: 'Maximum file size in bytes to diff (default: 1MB)'
+    required: false
+    default: '1048576'
+
+outputs:
+  diff-report:
+    description: 'The generated markdown diff report'
+    value: ${{ steps.generate-diff.outputs.report }}
+  has-changes:
+    description: 'Whether there are any changes between the images'
+    value: ${{ steps.generate-diff.outputs.has-changes }}
+  report-file:
+    description: 'Path to the generated report file'
+    value: ${{ steps.generate-diff.outputs.report-file }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup container-diff
+      shell: bash
+      run: |
+        echo "🔧 Installing container-diff..."
+        
+        # Make it executable and move to PATH
+        install ${{ github.action_path }}/container-diff /usr/local/bin/container-diff
+        
+        # Verify installation
+        echo "✅ Container-diff version:"
+        container-diff version
+
+    - name: Create diff script
+      shell: bash
+      run: |
+        echo "📝 Creating container diff script..."
+        cat > container-diff-pr-comment.sh << 'SCRIPT_EOF'
+        #!/bin/bash
+
+        set -e
+
+        if [ $# -lt 2 ] || [ $# -gt 4 ]; then
+            echo "Usage: $0 <image1> <image2> [allowed_extensions] [max_file_size]"
+            exit 1
+        fi
+
+        IMAGE1="$1"
+        IMAGE2="$2"
+        ALLOWED_EXTENSIONS="${3:-*}"
+        MAX_FILE_SIZE="${4:-1048576}"
+
+        if ! command -v container-diff &> /dev/null; then
+            echo "Error: container-diff is not installed or not in PATH"
+            exit 1
+        fi
+
+        if ! command -v jq &> /dev/null; then
+            echo "Error: jq is not installed or not in PATH"
+            exit 1
+        fi
+
+        # Function to check if file extension is allowed
+        is_extension_allowed() {
+            local file="$1"
+            local extensions="$2"
+        
+            # If extensions is "*", allow all files
+            if [ "$extensions" = "*" ]; then
+                return 0
+            fi
+        
+            # Extract file extension (handle files without extensions)
+            local ext=""
+            if [[ "$file" == *.* ]]; then
+                ext=$(echo "$file" | sed 's/.*\.//' | tr '[:upper:]' '[:lower:]')
+            else
+                # Handle special cases like Dockerfile, Makefile, etc.
+                local basename=$(basename "$file" | tr '[:upper:]' '[:lower:]')
+                case "$basename" in
+                    dockerfile*|makefile*|cmake*|rakefile*|gemfile*|podfile*)
+                        ext="$basename"
+                        ;;
+                    *)
+                        return 1  # No extension and not a special case
+                        ;;
+                esac
+            fi
+        
+            # Convert comma-separated extensions to array and check
+            IFS=',' read -ra EXT_ARRAY <<< "$extensions"
+            for allowed_ext in "${EXT_ARRAY[@]}"; do
+                # Trim whitespace and convert to lowercase
+                allowed_ext=$(echo "$allowed_ext" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+                if [ "$ext" = "$allowed_ext" ]; then
+                    return 0
+                fi
+            done
+        
+            return 1
+        }
+
+        echo "Getting file list differences..." >&2
+        FILE_DIFF_OUTPUT=$(container-diff diff "$IMAGE1" "$IMAGE2" --type=file -j)
+
+        # Parse file lists with size information
+        ADDS_WITH_SIZE=$(echo "$FILE_DIFF_OUTPUT" | jq -r '.[0].Diff.Adds // [] | .[] | "\(.Name) (\(.Size) bytes)"')
+        DELS_WITH_SIZE=$(echo "$FILE_DIFF_OUTPUT" | jq -r '.[0].Diff.Dels // [] | .[] | "\(.Name) (\(.Size) bytes)"')
+        MODS_WITH_SIZE=$(echo "$FILE_DIFF_OUTPUT" | jq -r '.[0].Diff.Mods // [] | .[] | "\(.Name) (\(.Size1) → \(.Size2) bytes)"')
+
+        # Parse file names only for processing diffs
+        MODS=$(echo "$FILE_DIFF_OUTPUT" | jq -r '.[0].Diff.Mods // [] | .[] | .Name')
+
+        # Count totals - handle empty results properly
+        if [ -n "$ADDS_WITH_SIZE" ] && [ "$ADDS_WITH_SIZE" != "" ]; then
+            ADD_COUNT=$(echo "$ADDS_WITH_SIZE" | wc -l)
+        else
+            ADD_COUNT=0
+        fi
+        
+        if [ -n "$DELS_WITH_SIZE" ] && [ "$DELS_WITH_SIZE" != "" ]; then
+            DEL_COUNT=$(echo "$DELS_WITH_SIZE" | wc -l)
+        else
+            DEL_COUNT=0
+        fi
+        
+        if [ -n "$MODS_WITH_SIZE" ] && [ "$MODS_WITH_SIZE" != "" ]; then
+            MOD_COUNT=$(echo "$MODS_WITH_SIZE" | wc -l)
+        else
+            MOD_COUNT=0
+        fi
+
+        # Start generating markdown
+        cat << EOF
+        ## 📦 Container Image Diff Report
+
+        **Images compared:**
+        - **Image 1:** \`$IMAGE1\`
+        - **Image 2:** \`$IMAGE2\`
+
+        ### Summary
+        - ✅ **Added:** $ADD_COUNT files
+        - ❌ **Deleted:** $DEL_COUNT files  
+        - 📝 **Modified:** $MOD_COUNT files
+
+        EOF
+
+        # Function to show added files
+        if [ "$ADD_COUNT" -gt 0 ] 2>/dev/null; then
+            echo "### ✅ Added Files"
+            echo ""
+            echo '```'
+            echo "$ADDS_WITH_SIZE"
+            echo '```'
+            echo ""
+        fi
+
+        # Function to show deleted files
+        if [ "$DEL_COUNT" -gt 0 ] 2>/dev/null; then
+            echo "### ❌ Deleted Files"
+            echo ""
+            echo '```'
+            echo "$DELS_WITH_SIZE"
+            echo '```'
+            echo ""
+        fi
+
+        # Function to show modified files with actual diffs
+        if [ "$MOD_COUNT" -gt 0 ] 2>/dev/null; then
+            echo "### 📝 Modified Files"
+            echo ""
+        
+            # Show modified files list with sizes first
+            echo "**Modified files:**"
+            echo '```'
+            echo "$MODS_WITH_SIZE"
+            echo '```'
+            echo ""
+        
+            # Get actual file diffs for modified files
+            echo "Getting file content diffs..." >&2
+        
+            while IFS= read -r file; do
+                if [ -n "$file" ]; then
+                    echo "#### \`$file\`"
+                    echo ""
+                    echo "<details>"
+                    echo "<summary>Show diff</summary>"
+                    echo ""
+        
+                    # Get file sizes from the original diff output
+                    FILE_SIZE1=$(echo "$FILE_DIFF_OUTPUT" | jq -r --arg file "$file" '.[0].Diff.Mods // [] | .[] | select(.Name == $file) | .Size1')
+                    FILE_SIZE2=$(echo "$FILE_DIFF_OUTPUT" | jq -r --arg file "$file" '.[0].Diff.Mods // [] | .[] | select(.Name == $file) | .Size2')
+        
+                    # Check if file extension is allowed
+                    if ! is_extension_allowed "$file" "$ALLOWED_EXTENSIONS"; then
+                        echo '```'
+                        echo "File extension not in allowed list - skipping diff"
+                        echo "To include this file type, add its extension to allowed-extensions input"
+                        echo '```'
+                    # Check if either file size is too large
+                    elif [ "$FILE_SIZE1" -gt "$MAX_FILE_SIZE" ] 2>/dev/null || [ "$FILE_SIZE2" -gt "$MAX_FILE_SIZE" ] 2>/dev/null; then
+                        echo '```'
+                        echo "File too large for diff display (max $(($MAX_FILE_SIZE / 1024))KB)"
+                        echo "Size: $FILE_SIZE1 → $FILE_SIZE2 bytes"
+                        echo '```'
+                    else
+                        # Run container-diff with file flag for this specific file
+                        FULL_OUTPUT=$(container-diff diff "$IMAGE1" "$IMAGE2" --type=file -f "$file" 2>/dev/null | tr -d '\0' || echo "Error: Could not get diff for $file")
+        
+                        if [ "$FULL_OUTPUT" = "Error: Could not get diff for $file" ]; then
+                            echo '```'
+                            echo "Could not retrieve diff content for this file"
+                            echo '```'
+                        else
+                            # Extract only the diff portion (everything after the "-----Diff of" line)
+                            DIFF_CONTENT=$(echo "$FULL_OUTPUT" | sed -n '/^-----Diff of.*-----$/,$ p' | tail -n +3)
+        
+                            if [ -n "$DIFF_CONTENT" ]; then
+                                echo '```diff'
+                                echo "$DIFF_CONTENT"
+                                echo '```'
+                            else
+                                echo '```'
+                                echo "No diff content available for this file"
+                                echo '```'
+                            fi
+                        fi
+                    fi
+        
+                    echo "</details>"
+                    echo ""
+                fi
+            done <<< "$MODS"
+        fi
+
+        echo "---"
+        echo "*Generated by [\`framjet/container-diff-action\`](https://github.com/framjet/container-diff-action) at $(date)*"
+        SCRIPT_EOF
+        
+        chmod +x container-diff-pr-comment.sh
+
+    - name: Generate container diff report
+      id: generate-diff
+      shell: bash
+      run: |
+        echo "🔍 Generating container diff report..."
+        
+        # Run the container diff script and capture output
+        if ./container-diff-pr-comment.sh "${{ inputs.image1 }}" "${{ inputs.image2 }}" "${{ inputs.allowed-extensions }}" "${{ inputs.max-file-size }}" > container-diff-report.md 2>/dev/null; then
+          echo "✅ Diff report generated successfully"
+        
+          # Check if there are any changes by looking at the actual counts
+          ADD_COUNT=$(grep -o "\*\*Added:\*\* [0-9]*" container-diff-report.md | grep -o "[0-9]*" || echo "0")
+          DEL_COUNT=$(grep -o "\*\*Deleted:\*\* [0-9]*" container-diff-report.md | grep -o "[0-9]*" || echo "0")
+          MOD_COUNT=$(grep -o "\*\*Modified:\*\* [0-9]*" container-diff-report.md | grep -o "[0-9]*" || echo "0")
+        
+          # Convert to numbers and check if any changes exist
+          TOTAL_CHANGES=$((ADD_COUNT + DEL_COUNT + MOD_COUNT))
+        
+          if [ "$TOTAL_CHANGES" -eq 0 ]; then
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has-changes=true" >> $GITHUB_OUTPUT
+          fi
+        
+          # Set outputs
+          echo "report-file=container-diff-report.md" >> $GITHUB_OUTPUT
+        
+          # Read the report content and set as output (escaped for multiline)
+          {
+            echo 'report<<DIFF_REPORT_EOF'
+            cat container-diff-report.md
+            echo 'DIFF_REPORT_EOF'
+          } >> $GITHUB_OUTPUT
+        
+        else
+          echo "❌ Failed to generate diff report"
+          echo "has-changes=false" >> $GITHUB_OUTPUT
+          echo "report-file=" >> $GITHUB_OUTPUT
+          echo "report=Failed to generate container diff report" >> $GITHUB_OUTPUT
+          exit 1
+        fi
