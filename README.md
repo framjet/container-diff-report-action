@@ -169,16 +169,18 @@ jobs:
 | `image2`             | Second container image to compare               | ✅        | -                                   |
 | `allowed-extensions` | Comma-separated list of file extensions to diff | ❌        | Common source code extensions* [^1] |
 | `max-file-size`      | Maximum file size in bytes to diff              | ❌        | `1048576` (1 MB)                    |
+| `render-html`        | Also render report as HTML                      | ❌        | `false`                             |
 
 [^1]: Default allowed extensions include: `js,ts,jsx,tsx,py,go,java,kt,swift,rb,php,c,cpp,h,hpp,cs,rs,scala,clj,sh,bash,zsh,fish,ps1,bat,cmd,dockerfile,makefile,cmake,yaml,yml,json,xml,toml,ini,cfg,conf,config,properties,env,sql,md,txt,html,css,scss,sass,less,vue,svelte,dart,lua,r,pl,pm,ex,exs,erl,hrl,elm,hs,lhs,ml,mli,fs,fsx,fsi,vb,asm,s,m,mm,plist`
 
 ## Outputs
 
-| Output        | Description                                  | Example                                |
-|---------------|----------------------------------------------|----------------------------------------|
-| `diff-report` | Complete markdown diff report                | `## 📦 Container Image Diff Report...` |
-| `has-changes` | Whether changes were detected between images | `true` / `false`                       |
-| `report-file` | Path to generated markdown report file       | `container-diff-report.md`             |
+| Output             | Description                                  | Example                                |
+|--------------------|----------------------------------------------|----------------------------------------|
+| `diff-report`      | Complete markdown diff report                | `## 📦 Container Image Diff Report...` |
+| `has-changes`      | Whether changes were detected between images | `true` / `false`                       |
+| `report-file`      | Path to generated markdown report file       | `container-diff-report.md`             |
+| `report-file-html` | Path to generated html report file           | `container-diff-report.html`           |
 
 ## Sample Output
 

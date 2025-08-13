@@ -20,6 +20,10 @@ inputs:
     description: 'Maximum file size in bytes to diff (default: 1MB)'
     required: false
     default: '1048576'
+  render-html:
+    description: 'Whether to render the report in HTML too (default: false)'
+    required: false
+    default: 'false'
 
 outputs:
   diff-report:
@@ -31,6 +35,9 @@ outputs:
   report-file:
     description: 'Path to the generated report file'
     value: ${{ steps.generate-diff.outputs.report-file }}
+  report-file-html:
+    description: 'Path to the generated HTML report file'
+    value: ${{ steps.generate-html.outputs.report-file-html }}
 
 runs:
   using: 'composite'
@@ -38,6 +45,7 @@ runs:
     - name: Setup container-diff
       shell: bash
       run: |
+        set +x
         echo "🔧 Installing container-diff..."
         
         # Make it executable and move to PATH
@@ -47,9 +55,24 @@ runs:
         echo "✅ Container-diff version:"
         container-diff version
 
+    - name: Setup HTML report generation
+      if: ${{ inputs.render-html == 'true' }}
+      shell: bash
+      run: |
+        set +x
+        echo "🔧 Installing pandoc for HTML report generation..."
+        
+        # Install pandoc
+        sudo apt-get update && sudo apt-get install -y pandoc
+        
+        # Verify installation
+        echo "✅ Pandoc version:"
+        pandoc --version
+
     - name: Create diff script
       shell: bash
       run: |
+        set +x
         echo "📝 Creating container diff script..."
         cat > container-diff-pr-comment.sh << 'SCRIPT_EOF'
         #!/bin/bash
@@ -222,7 +245,7 @@ runs:
                         echo '```'
                     else
                         # Run container-diff with file flag for this specific file
-                        FULL_OUTPUT=$(container-diff diff "$IMAGE1" "$IMAGE2" --type=file -f "$file" 2>/dev/null | tr -d '\0' || echo "Error: Could not get diff for $file")
+                        FULL_OUTPUT=$(container-diff diff "$IMAGE1" "$IMAGE2" --type=file -f "$file" 2>/dev/null || echo "Error: Could not get diff for $file")
         
                         if [ "$FULL_OUTPUT" = "Error: Could not get diff for $file" ]; then
                             echo '```'
@@ -230,7 +253,7 @@ runs:
                             echo '```'
                         else
                             # Extract only the diff portion (everything after the "-----Diff of" line)
-                            DIFF_CONTENT=$(echo "$FULL_OUTPUT" | sed -n '/^-----Diff of.*-----$/,$ p' | tail -n +3)
+                            DIFF_CONTENT=$(echo "$FULL_OUTPUT" | sed -n '/^-----Diff of.*-----$/,$ p' | tail -n +4)
         
                             if [ -n "$DIFF_CONTENT" ]; then
                                 echo '```diff'
@@ -260,6 +283,7 @@ runs:
       id: generate-diff
       shell: bash
       run: |
+        set +x
         echo "🔍 Generating container diff report..."
         
         # Run the container diff script and capture output
@@ -297,3 +321,14 @@ runs:
           echo "report=Failed to generate container diff report" >> $GITHUB_OUTPUT
           exit 1
         fi
+
+    - name: Generate HTML report (optional)
+      if: ${{ inputs.render-html == 'true' }}
+      id: generate-html
+      shell: bash
+      run: |
+        set +x
+        echo "🔍 Generating HTML report..."
+        pandoc -f gfm -s container-diff-report.md -o container-diff-report.html -V maxwidth=72em -V fontsize=14pt --highlight-style tango --lua-filter ${{ github.action_path }}/filter.lua
+        # Set outputs
+        echo "report-file-html=container-diff-report.html" >> $GITHUB_OUTPUT

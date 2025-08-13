@@ -13,6 +13,7 @@ jobs:
         with:
           image1: 'php:8.2'
           image2: 'php:8.3'
+          render-html: 'true'
 
       - name: Display results
         run: |
@@ -22,11 +23,18 @@ jobs:
           ${{ steps.diff.outputs.diff-report }}
           SUMMARY_EOF
 
-      - name: Upload report
+      - name: Upload markdown report
         uses: actions/upload-artifact@v4
         with:
           name: container-diff-report
           path: ${{ steps.diff.outputs.report-file }}
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-diff-report-html
+          path: ${{ steps.diff.outputs.report-file-html }}
+
   test-run-same:
     runs-on: ubuntu-latest
     steps:
