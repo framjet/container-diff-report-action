@@ -24,6 +24,10 @@ inputs:
     description: 'Whether to render the report in HTML too (default: false)'
     required: false
     default: 'false'
+  ignore-patterns:
+    description: 'Pipe-separated regex patterns for files to ignore (e.g., "node_modules/.*|\.git/.*|.*\.log")'
+    required: false
+    default: ''
 
 outputs:
   diff-report:
@@ -79,8 +83,8 @@ runs:
 
         set -e
 
-        if [ $# -lt 2 ] || [ $# -gt 4 ]; then
-            echo "Usage: $0 <image1> <image2> [allowed_extensions] [max_file_size]"
+        if [ $# -lt 2 ] || [ $# -gt 5 ]; then
+            echo "Usage: $0 <image1> <image2> [allowed_extensions] [max_file_size] [ignore_patterns]"
             exit 1
         fi
 
@@ -88,6 +92,7 @@ runs:
         IMAGE2="$2"
         ALLOWED_EXTENSIONS="${3:-*}"
         MAX_FILE_SIZE="${4:-1048576}"
+        IGNORE_PATTERNS="${5:-}"
 
         if ! command -v container-diff &> /dev/null; then
             echo "Error: container-diff is not installed or not in PATH"
@@ -98,6 +103,29 @@ runs:
             echo "Error: jq is not installed or not in PATH"
             exit 1
         fi
+
+        # Function to check if file should be ignored based on regex patterns
+        should_ignore_file() {
+            local file="$1"
+            local patterns="$2"
+            
+            # If no patterns specified, don't ignore
+            if [ -z "$patterns" ]; then
+                return 1
+            fi
+            
+            # Split patterns by pipe and check each one
+            IFS='|' read -ra PATTERN_ARRAY <<< "$patterns"
+            for pattern in "${PATTERN_ARRAY[@]}"; do
+                # Trim whitespace
+                pattern=$(echo "$pattern" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                if [ -n "$pattern" ] && echo "$file" | grep -qE "$pattern"; then
+                    return 0
+                fi
+            done
+            
+            return 1
+        }
 
         # Function to check if file extension is allowed
         is_extension_allowed() {
@@ -221,29 +249,35 @@ runs:
         
             while IFS= read -r file; do
                 if [ -n "$file" ]; then
-                    echo "#### \`$file\`"
-                    echo ""
-                    echo "<details>"
-                    echo "<summary>Show diff</summary>"
-                    echo ""
-        
                     # Get file sizes from the original diff output
                     FILE_SIZE1=$(echo "$FILE_DIFF_OUTPUT" | jq -r --arg file "$file" '.[0].Diff.Mods // [] | .[] | select(.Name == $file) | .Size1')
                     FILE_SIZE2=$(echo "$FILE_DIFF_OUTPUT" | jq -r --arg file "$file" '.[0].Diff.Mods // [] | .[] | select(.Name == $file) | .Size2')
         
+                    # Check if file should be ignored based on regex patterns
+                    if should_ignore_file "$file" "$IGNORE_PATTERNS"; then
+                       :
                     # Check if file extension is allowed
-                    if ! is_extension_allowed "$file" "$ALLOWED_EXTENSIONS"; then
-                        echo '```'
-                        echo "File extension not in allowed list - skipping diff"
-                        echo "To include this file type, add its extension to allowed-extensions input"
-                        echo '```'
+                    elif ! is_extension_allowed "$file" "$ALLOWED_EXTENSIONS"; then
+                       :
                     # Check if either file size is too large
                     elif [ "$FILE_SIZE1" -gt "$MAX_FILE_SIZE" ] 2>/dev/null || [ "$FILE_SIZE2" -gt "$MAX_FILE_SIZE" ] 2>/dev/null; then
+                        echo "#### \`$file\`"
+                        echo ""
+                        echo "<details>"
+                        echo "<summary>Show diff</summary>"
+                        echo ""
                         echo '```'
                         echo "File too large for diff display (max $(($MAX_FILE_SIZE / 1024))KB)"
                         echo "Size: $FILE_SIZE1 → $FILE_SIZE2 bytes"
                         echo '```'
+                        echo "</details>"
+                        echo ""
                     else
+                        echo "#### \`$file\`"
+                        echo ""
+                        echo "<details>"
+                        echo "<summary>Show diff</summary>"
+                        echo ""
                         # Run container-diff with file flag for this specific file
                         FULL_OUTPUT=$(container-diff diff "$IMAGE1" "$IMAGE2" --type=file -f "$file" 2>/dev/null || echo "Error: Could not get diff for $file")
         
@@ -265,11 +299,11 @@ runs:
                                 echo '```'
                             fi
                         fi
-                    fi
         
                     echo "</details>"
                     echo ""
                 fi
+            fi
             done <<< "$MODS"
         fi
 
@@ -287,7 +321,7 @@ runs:
         echo "🔍 Generating container diff report..."
         
         # Run the container diff script and capture output
-        if ./container-diff-pr-comment.sh "${{ inputs.image1 }}" "${{ inputs.image2 }}" "${{ inputs.allowed-extensions }}" "${{ inputs.max-file-size }}" > container-diff-report.md 2>/dev/null; then
+        if ./container-diff-pr-comment.sh "${{ inputs.image1 }}" "${{ inputs.image2 }}" "${{ inputs.allowed-extensions }}" "${{ inputs.max-file-size }}" "${{ inputs.ignore-patterns }}" > container-diff-report.md 2>/dev/null; then
           echo "✅ Diff report generated successfully"
         
           # Check if there are any changes by looking at the actual counts
